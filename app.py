@@ -136,16 +136,18 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------
-# EXACT WORKBOOK CONFIGURATION
+# WORKBOOK CONFIGURATION
 # ------------------------------------------------------------
 
 SHEET_STRATEGIC = "Strategic Indicators"
 SHEET_SCORECARD = "Master Scorecard"
 SHEET_CONTACTS = "District Contacts"
 SHEET_BASIC = "Basic District Info"
+SHEET_LEADERSHIP = "Leadership and Governance"
 
 COL_DISTRICT = "District Name"
 
+# Strategic Indicators columns
 COL_STRATEGIC_THEMES = "Strategic Plan Themes"
 COL_MATH_MENTIONED = "Math Improvement Mentioned"
 COL_MATH_STRENGTH = "Math Priority Strength"
@@ -166,12 +168,19 @@ COL_GRANTS_DETAILS = "Grants Details"
 COL_SOURCES = "Sources"
 COL_NOTES = "Notes"
 
+# Master Scorecard columns
 COL_ENROLLMENT = "Enrollment"
 COL_TIER = "Tier"
 COL_STRATEGIC_WEIGHTED_SCORE = "Strategic Weighted Score"
-COL_OVERALL_SCORE = "Overall Weighted Score (Strategic+Contract+Relationship)"
-COL_EXISTING_CONTRACTS = "Existing Contracts in Region (Yes/No)"
+
+# Current workbook score column
+COL_OVERALL_SCORE_CURRENT = "Overall Weighted Score (Strategic+Relationship Weighted)"
+
+# Older workbook score column, supported for backward compatibility
+COL_OVERALL_SCORE_OLD = "Overall Weighted Score (Strategic+Contract+Relationship)"
+
 COL_EXISTING_RELATIONSHIPS = "Existing Relationships"
+COL_EXISTING_CONTRACTS = "Existing Contracts in Region (Yes/No)"
 
 
 # ------------------------------------------------------------
@@ -197,7 +206,11 @@ def normalize_key(value):
 def clean_columns(df):
     """
     Clean column names by stripping whitespace and converting line breaks.
-    This handles columns like 'Career Readiness Mentioned '.
+
+    This handles columns like:
+    - 'Career Readiness Mentioned '
+    - 'Teacher Capacity/PD Focus '
+    - columns with hidden line breaks
     """
     if df.empty:
         return df
@@ -222,8 +235,8 @@ def read_table_sheet(xls, desired_sheet_name):
     """
     Reads a worksheet whose real table may not start on row 1.
 
-    This is critical for your workbook because Strategic Indicators has a
-    top Methods row before the real header row that starts with District Name.
+    This is critical because Strategic Indicators includes a Methods row
+    before the real header row containing District Name.
     """
     actual_sheet = find_sheet_name(xls, desired_sheet_name)
 
@@ -265,16 +278,6 @@ def read_table_sheet(xls, desired_sheet_name):
         data = data[data[COL_DISTRICT].astype(str).str.strip() != ""]
 
     return data.reset_index(drop=True)
-
-
-def get_col(row_or_df, column_name, default=""):
-    """
-    Safely get a value from a Series/dict using the cleaned column name.
-    """
-    try:
-        return row_or_df.get(column_name, default)
-    except Exception:
-        return default
 
 
 def value_contains(value, terms):
@@ -319,11 +322,35 @@ def district_match_key(value):
     return normalize_text(value).upper()
 
 
+def get_overall_score(score_row):
+    """
+    Pulls the overall score from either the current workbook column name
+    or the older workbook column name.
+
+    Current workbook:
+    Overall Weighted Score (Strategic+Relationship Weighted)
+
+    Older workbook:
+    Overall Weighted Score (Strategic+Contract+Relationship)
+    """
+    current_score = score_row.get(COL_OVERALL_SCORE_CURRENT, "")
+
+    if not pd.isna(current_score) and normalize_text(current_score) != "":
+        return current_score
+
+    old_score = score_row.get(COL_OVERALL_SCORE_OLD, "")
+
+    if not pd.isna(old_score) and normalize_text(old_score) != "":
+        return old_score
+
+    return ""
+
+
 # ------------------------------------------------------------
-# WORKBOOK VALIDATION / DEBUG
+# WORKBOOK DEBUG
 # ------------------------------------------------------------
 
-def show_workbook_debug(xls, indicators_df, scorecard_df, contacts_df, basic_df):
+def show_workbook_debug(xls, indicators_df, scorecard_df, contacts_df, basic_df, leadership_df):
     """
     Shows what the app sees in the workbook.
     Useful if the workbook changes later.
@@ -337,6 +364,7 @@ def show_workbook_debug(xls, indicators_df, scorecard_df, contacts_df, basic_df)
             ("Master Scorecard", scorecard_df),
             ("District Contacts", contacts_df),
             ("Basic District Info", basic_df),
+            ("Leadership and Governance", leadership_df),
         ]
 
         for label, df in debug_items:
@@ -364,9 +392,8 @@ def has_substantive_indicator(row):
     """
     Determines whether a Strategic Indicators row has actual usable strategy content.
 
-    In your workbook, rows from Aldine ISD through Fort Worth ISD have filled
-    strategy fields, while later rows mostly contain district names with blank
-    indicator fields.
+    In the current workbook, rows from Aldine ISD through Fort Worth ISD
+    have filled strategy fields, while later rows mostly contain only district names.
     """
     strategic_fields = [
         COL_STRATEGIC_THEMES,
@@ -400,12 +427,16 @@ def has_substantive_indicator(row):
 def is_fully_scored(score_row):
     """
     Determines whether a district has a complete enough Master Scorecard row.
+
+    A district must have:
+    - Tier
+    - Overall weighted score
     """
     if not score_row:
         return False
 
     tier = normalize_text(score_row.get(COL_TIER, ""))
-    score = score_row.get(COL_OVERALL_SCORE, "")
+    score = get_overall_score(score_row)
 
     if not tier:
         return False
@@ -420,12 +451,9 @@ def is_fully_scored(score_row):
 # CONTACT LOGIC
 # ------------------------------------------------------------
 
-def build_contacts(contacts_df, district_name, max_contacts=6):
+def build_contacts_from_district_contacts(contacts_df, district_name, max_contacts=6):
     """
-    Pulls high-value contacts for a district.
-
-    Prioritizes superintendent, academic, curriculum, math, CTE/CCMR,
-    SPED, multilingual/ELL, accountability, and professional learning.
+    Pulls high-value contacts from District Contacts if that sheet exists.
     """
     if contacts_df.empty or COL_DISTRICT not in contacts_df.columns:
         return []
@@ -478,6 +506,75 @@ def build_contacts(contacts_df, district_name, max_contacts=6):
     return contacts
 
 
+def build_contacts_from_leadership(leadership_df, district_name, max_contacts=6):
+    """
+    Pulls fallback contacts from Leadership and Governance.
+
+    Current workbook has Leadership and Governance but may not have District Contacts.
+    """
+    if leadership_df.empty or COL_DISTRICT not in leadership_df.columns:
+        return []
+
+    subset = leadership_df[
+        leadership_df[COL_DISTRICT].astype(str).str.strip().str.upper()
+        == district_match_key(district_name)
+    ]
+
+    if subset.empty:
+        return []
+
+    row = subset.iloc[0].to_dict()
+
+    contacts = []
+
+    possible_pairs = [
+        ("Superintendent", "Superintendent"),
+        ("Curriculum Lead", "Title"),
+        ("CTE Lead", "Title"),
+        ("Math Lead", "Title"),
+    ]
+
+    # Because Leadership and Governance has repeated generic "Title" columns in Excel,
+    # pandas may rename duplicates. We handle simple known fields first.
+    superintendent = normalize_text(row.get("Superintendent", ""))
+    if superintendent:
+        contacts.append(f"{superintendent} — Superintendent")
+
+    curriculum_lead = normalize_text(row.get("Curriculum Lead", ""))
+    if curriculum_lead:
+        contacts.append(f"{curriculum_lead} — Curriculum / Academic Lead")
+
+    cte_lead = normalize_text(row.get("CTE Lead", ""))
+    if cte_lead:
+        contacts.append(f"{cte_lead} — CTE / Career Readiness Lead")
+
+    math_lead = normalize_text(row.get("Math Lead", ""))
+    if math_lead:
+        contacts.append(f"{math_lead} — Math Lead")
+
+    # Clean up accidental mailto/link text if present.
+    cleaned = []
+    for contact in contacts:
+        contact = contact.replace("[", "").replace("]", "")
+        contact = contact.replace("(mailto:", " | ")
+        contact = contact.replace(")", "")
+        cleaned.append(contact)
+
+    return cleaned[:max_contacts]
+
+
+def build_contacts(contacts_df, leadership_df, district_name):
+    """
+    Uses District Contacts first, then Leadership and Governance as fallback.
+    """
+    contacts = build_contacts_from_district_contacts(contacts_df, district_name)
+
+    if contacts:
+        return contacts
+
+    return build_contacts_from_leadership(leadership_df, district_name)
+
+
 # ------------------------------------------------------------
 # BASIC DISTRICT INFO LOGIC
 # ------------------------------------------------------------
@@ -506,7 +603,7 @@ def get_basic_context(basic_df, district_name):
 
 def infer_tags(indicator_row, score_row):
     """
-    Creates searchable filter tags based on the exact Strategic Indicators fields.
+    Creates searchable filter tags based on Strategic Indicators and Master Scorecard.
     """
     tags = []
 
@@ -602,7 +699,12 @@ def build_lead_with(card):
     else:
         relationship_phrase = "as an initial consultative entry point"
 
-    top_tags = [tag for tag in tags if tag not in ["Existing Relationship", "Funding / Grants"]]
+    top_tags = [
+        tag
+        for tag in tags
+        if tag not in ["Existing Relationship", "Funding / Grants"]
+    ]
+
     top_tags_text = ", ".join(top_tags[:4]).lower()
 
     if not top_tags_text:
@@ -672,7 +774,6 @@ def build_questions(card):
     Builds NEPQ-style discovery questions based on the district tags and context.
     """
     tags = card.get("tags", [])
-    name = card.get("name", "the district")
 
     questions = []
 
@@ -739,23 +840,77 @@ def build_listen_for(tags):
     listen_for = []
 
     tag_map = {
-        "Math": ["math growth", "early numeracy", "Algebra readiness", "STAAR math", "student practice"],
-        "MTSS": ["intervention fidelity", "Tier 2", "Tier 3", "progress monitoring", "campus variation"],
-        "SPED/ELL": ["access to grade-level instruction", "service delivery", "emergent bilingual students", "students with disabilities", "subgroup gaps"],
-        "CCMR": ["pathways", "industry-based certifications", "TSIA2", "dual credit", "career awareness"],
-        "Teacher Capacity": ["teacher burden", "coaching", "professional learning", "PLC routines", "instructional consistency"],
-        "Curriculum / HQIM": ["adoption fidelity", "HQIM", "curriculum implementation", "Eureka", "Bluebonnet", "instructional materials"],
-        "Funding / Grants": ["Title funding", "grant alignment", "LASSO", "federal funds", "implementation funding"],
-        "Existing Relationship": ["existing relationship", "current contract", "expansion", "trusted partner"],
+        "Math": [
+            "math growth",
+            "early numeracy",
+            "Algebra readiness",
+            "STAAR math",
+            "student practice",
+        ],
+        "MTSS": [
+            "intervention fidelity",
+            "Tier 2",
+            "Tier 3",
+            "progress monitoring",
+            "campus variation",
+        ],
+        "SPED/ELL": [
+            "access to grade-level instruction",
+            "service delivery",
+            "emergent bilingual students",
+            "students with disabilities",
+            "subgroup gaps",
+        ],
+        "CCMR": [
+            "pathways",
+            "industry-based certifications",
+            "TSIA2",
+            "dual credit",
+            "career awareness",
+        ],
+        "Teacher Capacity": [
+            "teacher burden",
+            "coaching",
+            "professional learning",
+            "PLC routines",
+            "instructional consistency",
+        ],
+        "Curriculum / HQIM": [
+            "adoption fidelity",
+            "HQIM",
+            "curriculum implementation",
+            "Eureka",
+            "Bluebonnet",
+            "instructional materials",
+        ],
+        "Funding / Grants": [
+            "Title funding",
+            "grant alignment",
+            "LASSO",
+            "federal funds",
+            "implementation funding",
+        ],
+        "Existing Relationship": [
+            "existing relationship",
+            "current contract",
+            "expansion",
+            "trusted partner",
+        ],
     }
 
     for tag in tags:
         listen_for.extend(tag_map.get(tag, []))
 
-    listen_for.extend(["data cycles", "implementation barriers", "capacity constraints"])
+    listen_for.extend(
+        [
+            "data cycles",
+            "implementation barriers",
+            "capacity constraints",
+        ]
+    )
 
-    # Remove duplicates while preserving order
     unique = []
+
     for item in listen_for:
         if item not in unique:
             unique.append(item)
@@ -794,16 +949,21 @@ def build_avoid(tags):
 # CARD BUILDER
 # ------------------------------------------------------------
 
-def build_card(indicator_row, score_row, contacts_df, basic_df):
+def build_card(indicator_row, score_row, contacts_df, basic_df, leadership_df):
     """
     Combines the workbook sheets into a single district conversation card.
     """
     district_name = normalize_text(indicator_row.get(COL_DISTRICT, ""))
 
     tier = normalize_text(score_row.get(COL_TIER, ""))
-    raw_score = score_row.get(COL_OVERALL_SCORE, "")
+    raw_score = get_overall_score(score_row)
     score = format_number(raw_score, decimals=2)
-    strategic_score = format_number(score_row.get(COL_STRATEGIC_WEIGHTED_SCORE, ""), decimals=2)
+
+    strategic_score = format_number(
+        score_row.get(COL_STRATEGIC_WEIGHTED_SCORE, ""),
+        decimals=2,
+    )
+
     enrollment = format_enrollment(score_row.get(COL_ENROLLMENT, ""))
 
     tags = infer_tags(indicator_row, score_row)
@@ -811,13 +971,14 @@ def build_card(indicator_row, score_row, contacts_df, basic_df):
 
     basic = get_basic_context(basic_df, district_name)
 
-    csi = normalize_text(basic.get("CSI Schools", ""))
-    tsi = normalize_text(basic.get("TSI Schools", ""))
+    number_of_schools = normalize_text(basic.get("Number of Schools", ""))
+    grade_span = normalize_text(basic.get("Grade Span Served", ""))
     econ = normalize_text(basic.get("% Economically Disadvantaged", ""))
     ell = normalize_text(basic.get("% English Learner", ""))
     sped = normalize_text(basic.get("% Special Education", ""))
     student_groups = normalize_text(basic.get("Major Student Groups", ""))
     district_type = normalize_text(basic.get("Urban/Suburban/Rural", ""))
+    growth_trend = normalize_text(basic.get("Student Growth Trend", ""))
 
     signals = []
 
@@ -837,21 +998,26 @@ def build_card(indicator_row, score_row, contacts_df, basic_df):
     if math_strength:
         signals.append(f"Math signal: {math_strength}")
 
-    if csi or tsi:
-        signals.append(f"Accountability pressure: {csi or '0'} CSI schools and {tsi or '0'} TSI schools.")
+    context_parts = []
 
-    if district_type or student_groups:
-        context_parts = []
-        if district_type:
-            context_parts.append(f"{district_type} context")
-        if student_groups:
-            context_parts.append(f"major student group: {student_groups}")
-        if econ:
-            context_parts.append(f"economically disadvantaged: {econ}")
-        if ell:
-            context_parts.append(f"English learner: {ell}")
-        if sped:
-            context_parts.append(f"special education: {sped}")
+    if district_type:
+        context_parts.append(f"{district_type} context")
+    if number_of_schools:
+        context_parts.append(f"{number_of_schools} schools")
+    if grade_span:
+        context_parts.append(f"grade span: {grade_span}")
+    if student_groups:
+        context_parts.append(f"major student group: {student_groups}")
+    if econ:
+        context_parts.append(f"economically disadvantaged: {econ}")
+    if ell:
+        context_parts.append(f"English learner: {ell}")
+    if sped:
+        context_parts.append(f"special education: {sped}")
+    if growth_trend:
+        context_parts.append(f"student growth trend: {growth_trend}")
+
+    if context_parts:
         signals.append("District context: " + "; ".join(context_parts) + ".")
 
     if intervention_details:
@@ -878,9 +1044,17 @@ def build_card(indicator_row, score_row, contacts_df, basic_df):
     existing_contracts = normalize_text(score_row.get(COL_EXISTING_CONTRACTS, ""))
     existing_relationships = normalize_text(score_row.get(COL_EXISTING_RELATIONSHIPS, ""))
 
-    if existing_contracts or existing_relationships:
+    if existing_contracts and existing_relationships:
         signals.append(
-            f"Relationship context: existing contracts in region = {existing_contracts or 'Unknown'}; existing relationships = {existing_relationships or 'Unknown'}."
+            f"Relationship context: existing contracts in region = {existing_contracts}; existing relationships = {existing_relationships}."
+        )
+    elif existing_relationships:
+        signals.append(
+            f"Relationship context: existing relationships = {existing_relationships}."
+        )
+    elif existing_contracts:
+        signals.append(
+            f"Relationship context: existing contracts in region = {existing_contracts}."
         )
 
     card = {
@@ -891,7 +1065,7 @@ def build_card(indicator_row, score_row, contacts_df, basic_df):
         "enrollment": enrollment,
         "priority": priority,
         "tags": tags,
-        "contacts": build_contacts(contacts_df, district_name),
+        "contacts": build_contacts(contacts_df, leadership_df, district_name),
         "signals": signals,
         "alignment": build_alignment(tags),
         "questions": [],
@@ -921,12 +1095,13 @@ def load_cards_from_workbook(uploaded_file):
     scorecard_df = read_table_sheet(xls, SHEET_SCORECARD)
     contacts_df = read_table_sheet(xls, SHEET_CONTACTS)
     basic_df = read_table_sheet(xls, SHEET_BASIC)
+    leadership_df = read_table_sheet(xls, SHEET_LEADERSHIP)
 
     if indicators_df.empty or scorecard_df.empty:
-        return [], xls, indicators_df, scorecard_df, contacts_df, basic_df
+        return [], xls, indicators_df, scorecard_df, contacts_df, basic_df, leadership_df
 
     if COL_DISTRICT not in indicators_df.columns or COL_DISTRICT not in scorecard_df.columns:
-        return [], xls, indicators_df, scorecard_df, contacts_df, basic_df
+        return [], xls, indicators_df, scorecard_df, contacts_df, basic_df, leadership_df
 
     score_lookup = {}
 
@@ -957,10 +1132,17 @@ def load_cards_from_workbook(uploaded_file):
         if not is_fully_scored(score_row):
             continue
 
-        card = build_card(indicator_row, score_row, contacts_df, basic_df)
+        card = build_card(
+            indicator_row,
+            score_row,
+            contacts_df,
+            basic_df,
+            leadership_df,
+        )
+
         cards.append(card)
 
-    return cards, xls, indicators_df, scorecard_df, contacts_df, basic_df
+    return cards, xls, indicators_df, scorecard_df, contacts_df, basic_df, leadership_df
 
 
 # ------------------------------------------------------------
@@ -981,7 +1163,15 @@ def search_blob(card):
         card.get("lead", ""),
     ]
 
-    for key in ["tags", "signals", "alignment", "contacts", "questions", "listen", "avoid"]:
+    for key in [
+        "tags",
+        "signals",
+        "alignment",
+        "contacts",
+        "questions",
+        "listen",
+        "avoid",
+    ]:
         values.extend(card.get(key, []))
 
     return " ".join(map(str, values)).lower()
@@ -1060,7 +1250,9 @@ def render_card(card):
             for item in contacts:
                 st.markdown(f"- {item}")
         else:
-            st.markdown("_No contacts found for this district in District Contacts._")
+            st.markdown(
+                "_No District Contacts sheet was found, and no Leadership and Governance contacts were available for this district._"
+            )
 
     with st.expander("Ask These NEPQ-Style Questions", expanded=True):
         for item in card.get("questions", []):
@@ -1170,7 +1362,7 @@ with st.sidebar:
     )
 
     st.caption(
-        "Expected workbook: Texas Top 24 Research.xlsx with Strategic Indicators, Master Scorecard, District Contacts, and Basic District Info."
+        "Expected workbook: Texas Top 24 Research.xlsx with Strategic Indicators, Master Scorecard, Basic District Info, and Leadership and Governance. District Contacts is optional."
     )
 
 if not uploaded_file:
@@ -1178,9 +1370,24 @@ if not uploaded_file:
     st.stop()
 
 
-cards, xls, indicators_df, scorecard_df, contacts_df, basic_df = load_cards_from_workbook(uploaded_file)
+(
+    cards,
+    xls,
+    indicators_df,
+    scorecard_df,
+    contacts_df,
+    basic_df,
+    leadership_df,
+) = load_cards_from_workbook(uploaded_file)
 
-show_workbook_debug(xls, indicators_df, scorecard_df, contacts_df, basic_df)
+show_workbook_debug(
+    xls,
+    indicators_df,
+    scorecard_df,
+    contacts_df,
+    basic_df,
+    leadership_df,
+)
 
 if not cards:
     st.warning(
