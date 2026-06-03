@@ -125,7 +125,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------
-# WORKBOOK CONFIGURATION
+# EXACT WORKBOOK STRUCTURE
 # ------------------------------------------------------------
 
 SHEET_STRATEGIC = "Strategic Indicators"
@@ -136,9 +136,15 @@ SHEET_CONTACTS = "District Contacts"
 
 COL_DISTRICT = "District Name"
 
+# Current Master Scorecard score column from your Streamlit debug output
+COL_OVERALL_SCORE = "Overall Weighted Score (Strategic+Relationship Weighted)"
+
+# Fallback old score column, in case an older workbook is uploaded later
+COL_OVERALL_SCORE_OLD = "Overall Weighted Score (Strategic+Contract+Relationship)"
+
 
 # ------------------------------------------------------------
-# GENERAL HELPERS
+# BASIC HELPERS
 # ------------------------------------------------------------
 
 def safe_html(value):
@@ -167,38 +173,42 @@ def district_key(value):
 
 
 def clean_columns(df):
+    """
+    Cleans column names and drops the extra Methods column that appears
+    in Strategic Indicators.
+    """
     if df.empty:
         return df
 
     df = df.copy()
+
     df.columns = [
         str(col).strip().replace("\n", " ").replace("\r", " ")
         for col in df.columns
     ]
 
-    # Drop the Methods column from Strategic Indicators if it appears as a column.
-    drop_cols = [
+    methods_cols = [
         col for col in df.columns
         if str(col).strip().lower().startswith("methods:")
     ]
 
-    if drop_cols:
-        df = df.drop(columns=drop_cols)
+    if methods_cols:
+        df = df.drop(columns=methods_cols)
 
     return df
 
 
 def find_sheet_name(xls, desired_name):
-    sheet_lookup = {normalize_key(sheet): sheet for sheet in xls.sheet_names}
-    return sheet_lookup.get(normalize_key(desired_name))
+    lookup = {normalize_key(sheet): sheet for sheet in xls.sheet_names}
+    return lookup.get(normalize_key(desired_name))
 
 
 def read_table_sheet(xls, desired_sheet_name):
     """
-    Reads a worksheet even when the real table header is not on row 1.
+    Reads a worksheet even when the true header row is not the first row.
 
-    This matters because Strategic Indicators contains a Methods note before
-    or alongside the actual District Name header.
+    This matters because Strategic Indicators has a Methods row before
+    the real table.
     """
     actual_sheet = find_sheet_name(xls, desired_sheet_name)
 
@@ -230,6 +240,7 @@ def read_table_sheet(xls, desired_sheet_name):
     data = raw.iloc[header_row_index + 1:].copy()
     data.columns = headers
     data = clean_columns(data)
+
     data = data.dropna(how="all")
 
     if COL_DISTRICT in data.columns:
@@ -237,46 +248,6 @@ def read_table_sheet(xls, desired_sheet_name):
         data = data[data[COL_DISTRICT].astype(str).str.strip() != ""]
 
     return data.reset_index(drop=True)
-
-
-def row_get(row, *possible_columns, default=""):
-    """
-    Safely gets a row value by trying multiple possible column names.
-
-    This avoids breaking when a workbook uses slightly different score column names.
-    """
-    if row is None:
-        return default
-
-    # Direct match first
-    for col in possible_columns:
-        try:
-            if col in row.index:
-                return row.get(col, default)
-        except Exception:
-            pass
-
-    # Normalized match
-    try:
-        normalized_lookup = {
-            normalize_key(col): col
-            for col in row.index
-        }
-
-        for col in possible_columns:
-            key = normalize_key(col)
-            if key in normalized_lookup:
-                return row.get(normalized_lookup[key], default)
-    except Exception:
-        pass
-
-    return default
-
-
-def df_has_column(df, column_name):
-    if df.empty:
-        return False
-    return normalize_key(column_name) in [normalize_key(c) for c in df.columns]
 
 
 def format_number(value, decimals=2):
@@ -299,22 +270,68 @@ def format_enrollment(value):
         return normalize_text(value)
 
 
-def value_has_any(value, terms):
-    text = normalize_text(value).lower()
-    return any(term.lower() in text for term in terms)
+def get_score_value(score_row):
+    """
+    Pulls the overall score from your current workbook column.
+    Falls back to the older workbook column if needed.
+    """
+    if score_row is None:
+        return ""
+
+    current = score_row.get(COL_OVERALL_SCORE, "")
+
+    if not pd.isna(current) and normalize_text(current) != "":
+        return current
+
+    old = score_row.get(COL_OVERALL_SCORE_OLD, "")
+
+    if not pd.isna(old) and normalize_text(old) != "":
+        return old
+
+    return ""
+
+
+def get_row_value(row, column_name):
+    """
+    Safely gets a value from a row.
+    """
+    if row is None:
+        return ""
+
+    if column_name in row.index:
+        return row.get(column_name, "")
+
+    normalized_lookup = {
+        normalize_key(col): col for col in row.index
+    }
+
+    lookup_key = normalize_key(column_name)
+
+    if lookup_key in normalized_lookup:
+        return row.get(normalized_lookup[lookup_key], "")
+
+    return ""
 
 
 # ------------------------------------------------------------
-# WORKBOOK DEBUG
+# DEBUG PANEL
 # ------------------------------------------------------------
 
-def show_workbook_debug(xls, indicators_df, scorecard_df, basic_df, leadership_df, contacts_df, eligibility_audit):
+def show_workbook_debug(
+    xls,
+    strategic_df,
+    scorecard_df,
+    basic_df,
+    leadership_df,
+    contacts_df,
+    eligibility_df,
+):
     with st.expander("Workbook debug details", expanded=False):
         st.markdown("### Sheets found")
         st.write(xls.sheet_names)
 
         debug_items = [
-            ("Strategic Indicators", indicators_df),
+            ("Strategic Indicators", strategic_df),
             ("Master Scorecard", scorecard_df),
             ("Basic District Info", basic_df),
             ("Leadership and Governance", leadership_df),
@@ -338,34 +355,63 @@ def show_workbook_debug(xls, indicators_df, scorecard_df, basic_df, leadership_d
                 )
 
         st.markdown("### Eligibility audit")
-        st.dataframe(eligibility_audit, use_container_width=True)
+        if eligibility_df.empty:
+            st.warning("Eligibility audit is empty. That means no Strategic Indicators rows were processed.")
+        else:
+            st.dataframe(eligibility_df, use_container_width=True)
 
 
 # ------------------------------------------------------------
-# SCORECARD LOGIC
+# ELIGIBILITY
 # ------------------------------------------------------------
 
-def get_overall_score(score_row):
+def is_substantive_strategic_row(row):
     """
-    Supports both the current and older Master Scorecard score column names.
+    A row is substantive if it has actual strategy text in Strategic Indicators.
+
+    This excludes later rows where only District Name exists.
     """
-    return row_get(
-        score_row,
-        "Overall Weighted Score (Strategic+Relationship Weighted)",
-        "Overall Weighted Score (Strategic+Contract+Relationship)",
-        "Overall Weighted Score",
-        default="",
-    )
+    fields_to_check = [
+        "Strategic Plan Themes",
+        "Math Improvement Mentioned",
+        "Math Priority Strength",
+        "Intervention Focus",
+        "Intervention Focus Details",
+        "Teacher Capacity/PD Focus",
+        "Teacher Capacity Details",
+        "Career Readiness Mentioned",
+        "Career Readiness Details",
+        "MTSS/Tiered Support Mentioned",
+        "MTSS Details",
+        "Curriculum Review/Adoption Activity",
+        "Curriculum Details",
+        "Active Grants (Yes/No)",
+        "Grants Details",
+        "Notes",
+    ]
+
+    populated_count = 0
+
+    for field in fields_to_check:
+        if normalize_text(get_row_value(row, field)):
+            populated_count += 1
+
+    return populated_count >= 2
 
 
-def get_strategic_score(score_row):
-    return row_get(score_row, "Strategic Weighted Score", default="")
+def build_score_lookup(scorecard_df):
+    lookup = {}
 
+    if scorecard_df.empty or COL_DISTRICT not in scorecard_df.columns:
+        return lookup
 
-def is_score_present(value):
-    if pd.isna(value):
-        return False
-    return normalize_text(value) != ""
+    for _, row in scorecard_df.iterrows():
+        district_name = normalize_text(get_row_value(row, COL_DISTRICT))
+
+        if district_name:
+            lookup[district_key(district_name)] = row
+
+    return lookup
 
 
 def determine_priority(tier, score):
@@ -376,8 +422,7 @@ def determine_priority(tier, score):
         return "High"
 
     try:
-        numeric_score = float(score)
-        if numeric_score >= 3.5:
+        if float(score) >= 3.5:
             return "Medium-High"
     except Exception:
         pass
@@ -386,52 +431,26 @@ def determine_priority(tier, score):
 
 
 # ------------------------------------------------------------
-# ELIGIBILITY LOGIC
+# BASIC DISTRICT CONTEXT
 # ------------------------------------------------------------
 
-def has_substantive_indicator(row):
-    """
-    Uses a flexible rule: a district is substantive if it has meaningful text
-    in any Strategic Indicators fields besides District Name.
-    """
-    ignore_columns = {
-        normalize_key(COL_DISTRICT),
-        normalize_key("Sources"),
-    }
+def get_basic_context(basic_df, district_name):
+    if basic_df.empty or COL_DISTRICT not in basic_df.columns:
+        return {}
 
-    non_empty_fields = []
+    subset = basic_df[
+        basic_df[COL_DISTRICT].astype(str).str.strip().str.upper()
+        == district_key(district_name)
+    ]
 
-    for col in row.index:
-        if normalize_key(col) in ignore_columns:
-            continue
+    if subset.empty:
+        return {}
 
-        value = normalize_text(row.get(col, ""))
-
-        if value:
-            non_empty_fields.append(col)
-
-    return len(non_empty_fields) >= 2
-
-
-def create_score_lookup(scorecard_df):
-    lookup = {}
-
-    if scorecard_df.empty or COL_DISTRICT not in scorecard_df.columns:
-        return lookup
-
-    for _, row in scorecard_df.iterrows():
-        district = normalize_text(row_get(row, COL_DISTRICT))
-
-        if not district:
-            continue
-
-        lookup[district_key(district)] = row
-
-    return lookup
+    return subset.iloc[0].to_dict()
 
 
 # ------------------------------------------------------------
-# CONTACT LOGIC
+# CONTACTS
 # ------------------------------------------------------------
 
 def build_contacts_from_district_contacts(contacts_df, district_name, max_contacts=6):
@@ -445,26 +464,6 @@ def build_contacts_from_district_contacts(contacts_df, district_name, max_contac
 
     if subset.empty:
         return []
-
-    role_priority = [
-        "SUPERINTENDENT",
-        "CHIEF ACADEMIC OFFICER",
-        "ASSISTANT SUPERINTENDENT",
-        "CURRICULUM DIRECTOR",
-        "MATH COORDINATOR",
-        "CTE COLLEGE CAREER READINESS DIRECTOR",
-        "SPECIAL EDUCATION DIRECTOR",
-        "ESL ELL COORDINATOR",
-        "DIRECTOR ASSESSMENT DATA",
-        "PROFESSIONAL LEARNING DIRECTOR",
-        "ELA LITERACY COORDINATOR",
-    ]
-
-    if "Position" in subset.columns:
-        subset["_priority"] = subset["Position"].astype(str).str.upper().apply(
-            lambda x: role_priority.index(x) if x in role_priority else 99
-        )
-        subset = subset.sort_values("_priority")
 
     contacts = []
 
@@ -502,10 +501,10 @@ def build_contacts_from_leadership(leadership_df, district_name, max_contacts=6)
 
     contacts = []
 
-    superintendent = normalize_text(row_get(row, "Superintendent"))
-    curriculum_lead = normalize_text(row_get(row, "Curriculum Lead"))
-    cte_lead = normalize_text(row_get(row, "CTE Lead"))
-    math_lead = normalize_text(row_get(row, "Math Lead"))
+    superintendent = normalize_text(get_row_value(row, "Superintendent"))
+    curriculum_lead = normalize_text(get_row_value(row, "Curriculum Lead"))
+    cte_lead = normalize_text(get_row_value(row, "CTE Lead"))
+    math_lead = normalize_text(get_row_value(row, "Math Lead"))
 
     if superintendent:
         contacts.append(f"{superintendent} — Superintendent")
@@ -540,64 +539,46 @@ def build_contacts(contacts_df, leadership_df, district_name):
 
 
 # ------------------------------------------------------------
-# BASIC DISTRICT INFO
+# TAGS, ALIGNMENT, QUESTIONS
 # ------------------------------------------------------------
 
-def get_basic_context(basic_df, district_name):
-    if basic_df.empty or COL_DISTRICT not in basic_df.columns:
-        return {}
-
-    subset = basic_df[
-        basic_df[COL_DISTRICT].astype(str).str.strip().str.upper()
-        == district_key(district_name)
-    ]
-
-    if subset.empty:
-        return {}
-
-    return subset.iloc[0].to_dict()
-
-
-# ------------------------------------------------------------
-# TAGGING AND ALIGNMENT
-# ------------------------------------------------------------
-
-def infer_tags(indicator_row, score_row):
+def infer_tags(strategic_row, score_row):
     tags = []
 
-    if normalize_text(row_get(indicator_row, "Math Improvement Mentioned")) or normalize_text(row_get(indicator_row, "Math Priority Strength")):
-        tags.append("Math")
-
-    if normalize_text(row_get(indicator_row, "Intervention Focus")) or normalize_text(row_get(indicator_row, "MTSS/Tiered Support Mentioned")):
-        tags.append("MTSS")
-
-    # Some workbook versions include SPED/ELL fields; some current debug versions do not.
-    if normalize_text(row_get(indicator_row, "SPED/ELL Improvement Mentioned")) or normalize_text(row_get(indicator_row, "SPED/ELL Details")):
-        tags.append("SPED/ELL")
-
-    # If SPED/ELL fields are missing, infer from text.
-    combined_indicator_text = " ".join(
-        normalize_text(indicator_row.get(col, ""))
-        for col in indicator_row.index
+    all_text = " ".join(
+        normalize_text(strategic_row.get(col, ""))
+        for col in strategic_row.index
     ).lower()
 
-    if "sped" in combined_indicator_text or "special education" in combined_indicator_text or "english learner" in combined_indicator_text or "emergent bilingual" in combined_indicator_text or "ell" in combined_indicator_text:
-        if "SPED/ELL" not in tags:
-            tags.append("SPED/ELL")
+    if normalize_text(get_row_value(strategic_row, "Math Improvement Mentioned")) or normalize_text(get_row_value(strategic_row, "Math Priority Strength")):
+        tags.append("Math")
 
-    if normalize_text(row_get(indicator_row, "Career Readiness Mentioned")) or normalize_text(row_get(indicator_row, "Career Readiness Details")):
+    if normalize_text(get_row_value(strategic_row, "Intervention Focus")) or normalize_text(get_row_value(strategic_row, "MTSS/Tiered Support Mentioned")):
+        tags.append("MTSS")
+
+    if (
+        "sped" in all_text
+        or "special education" in all_text
+        or "english learner" in all_text
+        or "emergent bilingual" in all_text
+        or "ell" in all_text
+        or "multilingual" in all_text
+    ):
+        tags.append("SPED/ELL")
+
+    if normalize_text(get_row_value(strategic_row, "Career Readiness Mentioned")) or normalize_text(get_row_value(strategic_row, "Career Readiness Details")):
         tags.append("CCMR")
 
-    if normalize_text(row_get(indicator_row, "Teacher Capacity/PD Focus")) or normalize_text(row_get(indicator_row, "Teacher Capacity Details")):
+    if normalize_text(get_row_value(strategic_row, "Teacher Capacity/PD Focus")) or normalize_text(get_row_value(strategic_row, "Teacher Capacity Details")):
         tags.append("Teacher Capacity")
 
-    if normalize_text(row_get(indicator_row, "Curriculum Review/Adoption Activity")) or normalize_text(row_get(indicator_row, "Curriculum Details")):
+    if normalize_text(get_row_value(strategic_row, "Curriculum Review/Adoption Activity")) or normalize_text(get_row_value(strategic_row, "Curriculum Details")):
         tags.append("Curriculum / HQIM")
 
-    if normalize_text(row_get(indicator_row, "Active Grants (Yes/No)")) or normalize_text(row_get(indicator_row, "Grants Details")):
+    if normalize_text(get_row_value(strategic_row, "Active Grants (Yes/No)")) or normalize_text(get_row_value(strategic_row, "Grants Details")):
         tags.append("Funding / Grants")
 
-    existing_relationship = normalize_text(row_get(score_row, "Existing Relationships"))
+    existing_relationship = normalize_text(get_row_value(score_row, "Existing Relationships"))
 
     if existing_relationship.lower() == "yes":
         tags.append("Existing Relationship")
@@ -605,7 +586,13 @@ def infer_tags(indicator_row, score_row):
     if not tags:
         tags.append("Strategic Review")
 
-    return tags
+    # Remove duplicates while preserving order
+    unique = []
+    for tag in tags:
+        if tag not in unique:
+            unique.append(tag)
+
+    return unique
 
 
 def build_alignment(tags):
@@ -651,7 +638,8 @@ def build_lead_with(card):
         relationship_phrase = "as an initial consultative entry point"
 
     top_tags = [
-        tag for tag in tags
+        tag
+        for tag in tags
         if tag not in ["Existing Relationship", "Funding / Grants"]
     ]
 
@@ -747,34 +735,30 @@ def build_avoid(tags):
 # CARD BUILDER
 # ------------------------------------------------------------
 
-def build_card(indicator_row, score_row, basic_df, leadership_df, contacts_df):
-    district_name = normalize_text(row_get(indicator_row, COL_DISTRICT))
+def build_card(strategic_row, score_row, basic_df, leadership_df, contacts_df):
+    district_name = normalize_text(get_row_value(strategic_row, COL_DISTRICT))
 
-    raw_score = get_overall_score(score_row)
+    raw_score = get_score_value(score_row)
     score = format_number(raw_score, decimals=2)
+    strategic_score = format_number(get_row_value(score_row, "Strategic Weighted Score"), decimals=2)
+    tier = normalize_text(get_row_value(score_row, "Tier"))
+    enrollment = format_enrollment(get_row_value(score_row, "Enrollment"))
 
-    strategic_score = format_number(get_strategic_score(score_row), decimals=2)
-    tier = normalize_text(row_get(score_row, "Tier"))
-    enrollment = format_enrollment(row_get(score_row, "Enrollment"))
-
-    tags = infer_tags(indicator_row, score_row)
+    tags = infer_tags(strategic_row, score_row)
     priority = determine_priority(tier, raw_score)
 
     basic = get_basic_context(basic_df, district_name)
 
     signals = []
 
-    themes = normalize_text(row_get(indicator_row, "Strategic Plan Themes"))
-    math_strength = normalize_text(row_get(indicator_row, "Math Priority Strength"))
-    intervention_details = normalize_text(row_get(indicator_row, "Intervention Focus Details"))
-    teacher_details = normalize_text(row_get(indicator_row, "Teacher Capacity Details"))
-    career_details = normalize_text(row_get(indicator_row, "Career Readiness Details"))
-    mtss_details = normalize_text(row_get(indicator_row, "MTSS Details"))
-    curriculum_details = normalize_text(row_get(indicator_row, "Curriculum Details"))
-    grants_details = normalize_text(row_get(indicator_row, "Grants Details"))
-
-    # SPED/ELL fields may exist in some workbook versions and may not exist in current debug version.
-    sped_ell_details = normalize_text(row_get(indicator_row, "SPED/ELL Details"))
+    themes = normalize_text(get_row_value(strategic_row, "Strategic Plan Themes"))
+    math_strength = normalize_text(get_row_value(strategic_row, "Math Priority Strength"))
+    intervention_details = normalize_text(get_row_value(strategic_row, "Intervention Focus Details"))
+    teacher_details = normalize_text(get_row_value(strategic_row, "Teacher Capacity Details"))
+    career_details = normalize_text(get_row_value(strategic_row, "Career Readiness Details"))
+    mtss_details = normalize_text(get_row_value(strategic_row, "MTSS Details"))
+    curriculum_details = normalize_text(get_row_value(strategic_row, "Curriculum Details"))
+    grants_details = normalize_text(get_row_value(strategic_row, "Grants Details"))
 
     if themes:
         signals.append(f"Strategic themes: {themes}")
@@ -807,9 +791,6 @@ def build_card(indicator_row, score_row, basic_df, leadership_df, contacts_df):
     if mtss_details:
         signals.append(f"MTSS signal: {mtss_details}")
 
-    if sped_ell_details:
-        signals.append(f"SPED/ELL signal: {sped_ell_details}")
-
     if teacher_details:
         signals.append(f"Teacher capacity signal: {teacher_details}")
 
@@ -822,15 +803,10 @@ def build_card(indicator_row, score_row, basic_df, leadership_df, contacts_df):
     if grants_details:
         signals.append(f"Funding / grants signal: {grants_details}")
 
-    existing_relationships = normalize_text(row_get(score_row, "Existing Relationships"))
-    existing_contracts = normalize_text(row_get(score_row, "Existing Contracts in Region (Yes/No)"))
+    existing_relationships = normalize_text(get_row_value(score_row, "Existing Relationships"))
 
-    if existing_contracts and existing_relationships:
-        signals.append(f"Relationship context: existing contracts in region = {existing_contracts}; existing relationships = {existing_relationships}.")
-    elif existing_relationships:
+    if existing_relationships:
         signals.append(f"Relationship context: existing relationships = {existing_relationships}.")
-    elif existing_contracts:
-        signals.append(f"Relationship context: existing contracts in region = {existing_contracts}.")
 
     card = {
         "name": district_name,
@@ -863,36 +839,35 @@ def build_card(indicator_row, score_row, basic_df, leadership_df, contacts_df):
 def load_cards_from_workbook(uploaded_file):
     xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
 
-    indicators_df = read_table_sheet(xls, SHEET_STRATEGIC)
+    strategic_df = read_table_sheet(xls, SHEET_STRATEGIC)
     scorecard_df = read_table_sheet(xls, SHEET_SCORECARD)
     basic_df = read_table_sheet(xls, SHEET_BASIC)
     leadership_df = read_table_sheet(xls, SHEET_LEADERSHIP)
     contacts_df = read_table_sheet(xls, SHEET_CONTACTS)
 
+    if strategic_df.empty or scorecard_df.empty:
+        return [], xls, strategic_df, scorecard_df, basic_df, leadership_df, contacts_df, pd.DataFrame()
+
+    score_lookup = build_score_lookup(scorecard_df)
+
     eligibility_rows = []
-
-    if indicators_df.empty or scorecard_df.empty:
-        return [], xls, indicators_df, scorecard_df, basic_df, leadership_df, contacts_df, pd.DataFrame()
-
-    score_lookup = create_score_lookup(scorecard_df)
-
     cards = []
 
-    for _, indicator_row in indicators_df.iterrows():
-        district_name = normalize_text(row_get(indicator_row, COL_DISTRICT))
+    for _, strategic_row in strategic_df.iterrows():
+        district_name = normalize_text(get_row_value(strategic_row, COL_DISTRICT))
 
         if not district_name:
             continue
 
-        substantive = has_substantive_indicator(indicator_row)
+        substantive = is_substantive_strategic_row(strategic_row)
         score_row = score_lookup.get(district_key(district_name))
 
         matched_scorecard = score_row is not None
-        tier = normalize_text(row_get(score_row, "Tier")) if matched_scorecard else ""
-        overall_score = get_overall_score(score_row) if matched_scorecard else ""
+        tier = normalize_text(get_row_value(score_row, "Tier")) if matched_scorecard else ""
+        overall_score = get_score_value(score_row) if matched_scorecard else ""
 
         tier_present = bool(tier)
-        score_present = is_score_present(overall_score)
+        score_present = normalize_text(overall_score) != ""
 
         eligible = substantive and matched_scorecard and tier_present and score_present
 
@@ -907,22 +882,20 @@ def load_cards_from_workbook(uploaded_file):
             }
         )
 
-        if not eligible:
-            continue
-
-        cards.append(
-            build_card(
-                indicator_row=indicator_row,
-                score_row=score_row,
-                basic_df=basic_df,
-                leadership_df=leadership_df,
-                contacts_df=contacts_df,
+        if eligible:
+            cards.append(
+                build_card(
+                    strategic_row=strategic_row,
+                    score_row=score_row,
+                    basic_df=basic_df,
+                    leadership_df=leadership_df,
+                    contacts_df=contacts_df,
+                )
             )
-        )
 
-    eligibility_audit = pd.DataFrame(eligibility_rows)
+    eligibility_df = pd.DataFrame(eligibility_rows)
 
-    return cards, xls, indicators_df, scorecard_df, basic_df, leadership_df, contacts_df, eligibility_audit
+    return cards, xls, strategic_df, scorecard_df, basic_df, leadership_df, contacts_df, eligibility_df
 
 
 # ------------------------------------------------------------
@@ -1131,22 +1104,22 @@ if not uploaded_file:
 (
     cards,
     xls,
-    indicators_df,
+    strategic_df,
     scorecard_df,
     basic_df,
     leadership_df,
     contacts_df,
-    eligibility_audit,
+    eligibility_df,
 ) = load_cards_from_workbook(uploaded_file)
 
 show_workbook_debug(
     xls=xls,
-    indicators_df=indicators_df,
+    strategic_df=strategic_df,
     scorecard_df=scorecard_df,
     basic_df=basic_df,
     leadership_df=leadership_df,
     contacts_df=contacts_df,
-    eligibility_audit=eligibility_audit,
+    eligibility_df=eligibility_df,
 )
 
 if not cards:
