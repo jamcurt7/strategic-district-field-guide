@@ -1959,4 +1959,3 @@ with tab_diag:
         score_cols,
         data_source_label,
     )
-``
