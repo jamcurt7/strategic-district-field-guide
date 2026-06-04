@@ -8,7 +8,8 @@ import streamlit as st
 from docx import Document
 from docx.shared import RGBColor, Inches
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
-
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 # ============================================================
 # PAGE CONFIG
@@ -22,7 +23,6 @@ st.set_page_config(
 )
 
 BUILT_IN_WORKBOOK = "Texas Top 24 Research.xlsx"
-
 
 # ============================================================
 # STYLING
@@ -272,16 +272,6 @@ select,
     margin-bottom:.25rem;
 }
 
-.lead {
-    background:var(--blue-soft);
-    border-left:4px solid var(--blue);
-    border-radius:14px;
-    padding:.75rem;
-    margin:.6rem 0;
-    line-height:1.45;
-    color: var(--text) !important;
-}
-
 .badge,
 .chip {
     display:inline-block;
@@ -408,12 +398,6 @@ select,
     color: var(--text) !important;
 }
 
-hr {
-    border:0;
-    border-top:1px solid var(--border);
-    margin:1.2rem 0;
-}
-
 @media (max-width: 800px) {
     .summary-grid {
         grid-template-columns: 1fr;
@@ -422,7 +406,6 @@ hr {
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-
 
 # ============================================================
 # EXPECTED LARGER WORKBOOK SHEETS
@@ -436,7 +419,6 @@ SHEET_LEADERSHIP = "Leadership and Governance"
 SHEET_CSI = "CSI"
 SHEET_TSI = "TSI"
 DISTRICT_COL = "District Name"
-
 
 # ============================================================
 # BASIC HELPERS
@@ -544,9 +526,9 @@ def find_col(df, exact_names=None, contains_all=None):
     normalized_map = {normalize_key(col): col for col in df.columns}
 
     for name in exact_names:
-        key = normalize_key(name)
-        if key in normalized_map:
-            return normalized_map[key]
+        key_name = normalize_key(name)
+        if key_name in normalized_map:
+            return normalized_map[key_name]
 
     if contains_all:
         for col in df.columns:
@@ -562,15 +544,15 @@ def get_value(row_or_dict, col_name, default=""):
         return default
 
     if isinstance(row_or_dict, dict):
-        for key, value in row_or_dict.items():
-            if normalize_key(key) == normalize_key(col_name):
+        for key_name, value in row_or_dict.items():
+            if normalize_key(key_name) == normalize_key(col_name):
                 return value
         return default
 
     try:
-        for key in row_or_dict.index:
-            if normalize_key(key) == normalize_key(col_name):
-                return row_or_dict.get(key, default)
+        for key_name in row_or_dict.index:
+            if normalize_key(key_name) == normalize_key(col_name):
+                return row_or_dict.get(key_name, default)
     except Exception:
         return default
 
@@ -875,10 +857,10 @@ def build_contacts_lookup_from_leadership(leadership_df):
 
 
 def get_contacts(district_name, contacts_lookup, leadership_lookup):
-    key = district_key(district_name)
-    if key in contacts_lookup and contacts_lookup[key]:
-        return contacts_lookup[key][:6]
-    return leadership_lookup.get(key, [])[:6]
+    key_name = district_key(district_name)
+    if key_name in contacts_lookup and contacts_lookup[key_name]:
+        return contacts_lookup[key_name][:6]
+    return leadership_lookup.get(key_name, [])[:6]
 
 
 # ============================================================
@@ -1103,7 +1085,7 @@ def build_compact_summary(card):
 
 def build_card(strategic_row, score_row, basic_lookup, contacts_lookup, leadership_lookup, csi_counts, tsi_counts, score_cols):
     district_name = normalize_text(get_value(strategic_row, DISTRICT_COL))
-    key = district_key(district_name)
+    district_id = district_key(district_name)
 
     raw_score = score_row.get(score_cols["overall_score"], "")
     score = format_number(raw_score, 2)
@@ -1112,11 +1094,10 @@ def build_card(strategic_row, score_row, basic_lookup, contacts_lookup, leadersh
     enrollment = format_enrollment(score_row.get(score_cols["enrollment"], "")) if score_cols.get("enrollment") else ""
 
     tags = infer_tags(strategic_row, score_row)
-    priority = determine_priority(tier, raw_score)
-    basic = basic_lookup.get(key, {})
+    card_priority = determine_priority(tier, raw_score)
+    basic = basic_lookup.get(district_id, {})
 
     signals = []
-
     themes = normalize_text(get_value(strategic_row, "Strategic Plan Themes"))
     math_strength = normalize_text(get_value(strategic_row, "Math Priority Strength"))
     intervention_details = normalize_text(get_value(strategic_row, "Intervention Focus Details"))
@@ -1132,8 +1113,8 @@ def build_card(strategic_row, score_row, basic_lookup, contacts_lookup, leadersh
     if math_strength:
         signals.append(f"Math signal: {math_strength}")
 
-    csi = normalize_text(get_value(basic, "CSI Schools")) or str(csi_counts.get(key, ""))
-    tsi = normalize_text(get_value(basic, "TSI Schools")) or str(tsi_counts.get(key, ""))
+    csi = normalize_text(get_value(basic, "CSI Schools")) or str(csi_counts.get(district_id, ""))
+    tsi = normalize_text(get_value(basic, "TSI Schools")) or str(tsi_counts.get(district_id, ""))
     if csi or tsi:
         signals.append(f"Accountability pressure: {csi or '0'} CSI schools and {tsi or '0'} TSI schools.")
 
@@ -1193,7 +1174,7 @@ def build_card(strategic_row, score_row, basic_lookup, contacts_lookup, leadersh
         "score": score,
         "strategic_score": strategic_score,
         "enrollment": enrollment,
-        "priority": priority,
+        "priority": card_priority,
         "tags": tags,
         "contacts": get_contacts(district_name, contacts_lookup, leadership_lookup),
         "signals": signals,
@@ -1205,7 +1186,6 @@ def build_card(strategic_row, score_row, basic_lookup, contacts_lookup, leadersh
     card["lead"] = build_lead_with(card)
     card["questions"] = build_refined_questions(card)
     card["compact"] = build_compact_summary(card)
-
     return card
 
 
@@ -1250,9 +1230,9 @@ def load_cards_from_workbook(workbook_source):
         if not district_name:
             continue
 
-        key = district_key(district_name)
+        district_id = district_key(district_name)
         substantive = is_substantive_strategic_row(strategic_row)
-        score_row = score_lookup.get(key, {})
+        score_row = score_lookup.get(district_id, {})
         matched = bool(score_row)
         tier = normalize_text(score_row.get(score_cols.get("tier"), "")) if matched and score_cols.get("tier") else ""
         overall = score_row.get(score_cols.get("overall_score"), "") if matched and score_cols.get("overall_score") else ""
@@ -1337,8 +1317,8 @@ def search_blob(card):
         card.get("priority", ""),
         card.get("lead", ""),
     ]
-    for key in ["tags", "signals", "alignment", "contacts", "questions", "listen", "avoid"]:
-        values.extend(card.get(key, []))
+    for field in ["tags", "signals", "alignment", "contacts", "questions", "listen", "avoid"]:
+        values.extend(card.get(field, []))
     return " ".join(map(str, values)).lower()
 
 
@@ -1387,14 +1367,14 @@ def render_summary_grid(card):
 def render_quick_prep(card):
     top_listen = card.get("listen", [])[:8]
     best_question = card.get("questions", [""])[0] if card.get("questions") else ""
-    avoid = card.get("avoid", [""])[0] if card.get("avoid") else ""
+    key_guidance = card.get("avoid", [""])[0] if card.get("avoid") else ""
     chips = "".join(chip_html(item) for item in top_listen)
     st.markdown(f"""
     <div class="quickprep">
         <div class="quickprep-title">Quick Prep</div>
         <strong>Best opening question:</strong> {safe_html(best_question)}<br>
         <strong>Listen for:</strong><br>{chips}<br>
-        <strong>Avoid:</strong> {safe_html(avoid)}
+        <strong>Guidance:</strong> {safe_html(key_guidance)}
     </div>
     """, unsafe_allow_html=True)
 
@@ -1432,16 +1412,21 @@ def render_card(card, view_mode="Quick Brief"):
     for item in card.get("questions", [])[:4]:
         st.markdown(f"- {item}")
 
-    with st.expander("Key Contacts", expanded=False):
-        contacts = card.get("contacts", [])
-        if contacts:
-            for item in contacts[:6]:
-                st.markdown(f"- {item}")
-        else:
-            st.markdown("_No contacts were available for this district._")
+    # Phase 1 improvement: show top 3 contacts inline, rest in expander
+    contacts = card.get("contacts", [])
+    st.markdown("**Key Contacts**")
+    if contacts:
+        for item in contacts[:3]:
+            st.markdown(f"- {item}")
+        if len(contacts) > 3:
+            with st.expander("Show all contacts", expanded=False):
+                for item in contacts[3:6]:
+                    st.markdown(f"- {item}")
+    else:
+        st.markdown("_No contacts were available for this district._")
 
     if view_mode == "Full Detail":
-        with st.expander("Full Strategic Detail", expanded=False):
+        with st.expander("Deeper Planning Detail", expanded=False):
             st.markdown("**Strategic Signals**")
             for item in card.get("signals", []):
                 st.markdown(f"- {item}")
@@ -1450,10 +1435,10 @@ def render_card(card, view_mode="Quick Brief"):
             for item in card.get("alignment", []):
                 st.markdown(f"- {item}")
 
-            st.markdown("**Listen For**")
+            st.markdown("**Full Listen For**")
             st.markdown("".join(chip_html(item) for item in card.get("listen", [])), unsafe_allow_html=True)
 
-            st.markdown("**Avoid**")
+            st.markdown("**Full Guidance**")
             for item in card.get("avoid", []):
                 st.markdown(f"- {item}")
 
@@ -1495,8 +1480,6 @@ def add_bullets(cell, items, limit=None):
 
 def shade_cell(cell, fill):
     tc_pr = cell._tc.get_or_add_tcPr()
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
     shd = OxmlElement("w:shd")
     shd.set(qn("w:fill"), fill)
     tc_pr.append(shd)
@@ -1524,16 +1507,16 @@ def build_docx(cards):
             if item:
                 doc.add_paragraph(item, style="List Bullet")
 
-        for section_title, key in [
+        for section_title, field_name in [
             ("Top Strategic Signals", "signals"),
             ("Best-Fit PCG / Emerald Alignment", "alignment"),
             ("Key Contacts", "contacts"),
             ("Discovery Questions", "questions"),
             ("Listen For", "listen"),
-            ("Avoid", "avoid"),
+            ("Guidance", "avoid"),
         ]:
             doc.add_heading(section_title, level=2)
-            for item in card.get(key, []):
+            for item in card.get(field_name, []):
                 doc.add_paragraph(item, style="List Bullet")
 
     bio = BytesIO()
@@ -1571,8 +1554,8 @@ def build_matrix_docx(cards):
     ]
 
     hdr_cells = table.rows[0].cells
-    for i, h in enumerate(headers):
-        hdr_cells[i].text = h
+    for i, header in enumerate(headers):
+        hdr_cells[i].text = header
         shade_cell(hdr_cells[i], "1F4E79")
         for p in hdr_cells[i].paragraphs:
             for run in p.runs:
@@ -1627,8 +1610,8 @@ def build_matrix_docx(cards):
         "Representative Resource / Service Fit",
     ]
 
-    for i, h in enumerate(lens_headers):
-        lens.rows[0].cells[i].text = h
+    for i, header in enumerate(lens_headers):
+        lens.rows[0].cells[i].text = header
         shade_cell(lens.rows[0].cells[i], "1F4E79")
         for p in lens.rows[0].cells[i].paragraphs:
             for run in p.runs:
@@ -1700,8 +1683,8 @@ def render_how_to(data_source_label):
       <li>Search the district name.</li>
       <li>Read Why It Matters, Best Entry Point, and Likely Barrier.</li>
       <li>Use the Quick Prep question to start discovery.</li>
-      <li>Open Key Contacts for names, titles, and emails.</li>
-      <li>Use the Full Matrix download for deeper post-meeting planning.</li>
+      <li>Review the top contacts and open the full contact list if needed.</li>
+      <li>Use the full matrix download for deeper post-meeting planning.</li>
     </ol>
     </div>
     """, unsafe_allow_html=True)
